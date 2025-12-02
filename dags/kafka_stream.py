@@ -53,7 +53,7 @@ def stream_data():
         
         # Attendre la confirmation de l'envoi
         record_metadata = future.get(timeout=10)
-        print(f"✅ Données envoyées avec succès!")
+        print(f" Données envoyées avec succès!")
         print(f"   Topic: {record_metadata.topic}")
         print(f"   Partition: {record_metadata.partition}")
         print(f"   Offset: {record_metadata.offset}")
@@ -62,7 +62,7 @@ def stream_data():
         producer.flush()
         producer.close()
     except Exception as e:
-        print(f"❌ Erreur lors de l'envoi des données: {e}")
+        print(f"Erreur lors de l'envoi des données: {e}")
         raise
 
 
