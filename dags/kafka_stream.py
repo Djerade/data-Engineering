@@ -2,8 +2,7 @@ from datetime import datetime, timedelta
 import json
 import requests
 from airflow import DAG
-
-
+from kafka import KafkaProducer
 
 
 default_args = {
@@ -47,8 +46,24 @@ def format_data(data):
 def stream_data():
     data = get_data()
     data_formatted = format_data(data)
-    print(json.dumps(data_formatted, indent=2))
-
+    
+    try:
+        producer = KafkaProducer(bootstrap_servers=['localhost:9092'], max_block_ms=5000)
+        future = producer.send('users', json.dumps(data_formatted).encode('utf-8'))
+        
+        # Attendre la confirmation de l'envoi
+        record_metadata = future.get(timeout=10)
+        print(f"✅ Données envoyées avec succès!")
+        print(f"   Topic: {record_metadata.topic}")
+        print(f"   Partition: {record_metadata.partition}")
+        print(f"   Offset: {record_metadata.offset}")
+        print(f"   Utilisateur: {data_formatted['first_name']} {data_formatted['last_name']} ({data_formatted['email']})")
+        
+        producer.flush()
+        producer.close()
+    except Exception as e:
+        print(f"❌ Erreur lors de l'envoi des données: {e}")
+        raise
 
 
 stream_data()
