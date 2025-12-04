@@ -18,11 +18,11 @@ services:
       start_period: 30s
     restart: always
     networks:
-      - confluent-network
+      - confluent-networks
 
   schema-registry:
     image: confluentinc/cp-schema-registry:latest
-    container_name: schema-registry
+    container_name: dataengineering-schema-registry
     depends_on:
       broker:
         condition: service_healthy
@@ -41,27 +41,32 @@ services:
       retries: 5
     restart: always
     networks:
-      - confluent-network
+      - confluent-networks
 
 
-  # Control Center désactivé car incompatible avec les listeners personnalisés
-  # Pour l'activer, utilisez uniquement PLAINTEXT pour tous les listeners
-  # control-center:
-  #   image: confluentinc/cp-control-center:latest
-  #   container_name: control-center
-  #   depends_on:
-  #     broker:
-  #       condition: service_healthy
-  #     schema-registry:
-  #       condition: service_healthy
-  #   ports:
-  #     - "9021:9021"
-  #   environment:
-  #     CONTROL_CENTER_BOOTSTRAP_SERVERS: broker:29092
-  #     CONTROL_CENTER_ZOOKEEPER_CONNECT: zookeeper:2181
-  #     CONTROL_CENTER_SCHEMA_REGISTRY_URL: http://schema-registry:8081
-  #   networks:
-  #     - confluent-network
+  control-center:
+    image: confluentinc/cp-control-center:latest
+    container_name: control-center
+    depends_on:
+      broker:
+        condition: service_healthy
+
+      schema-registry:
+        condition: service_healthy
+
+    ports:
+      - "9021:9021"
+    environment:
+      CONTROL_CENTER_BOOTSTRAP_SERVERS: broker:29092
+      CONTROL_CENTER_ZOOKEEPER_CONNECT: zookeeper:2181
+      CONTROL_CENTER_SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      CONTROL_CENTER_CONNECT_URL: http://broker:8083
+      CONTROL_CENTER_REPLICATION_FACTOR: 1
+      CONTROL_CENTER_AUTO_CREATE_TOPICS_ENABLE: true
+      CONTROL_CENTER_LOG4J_LOGLEVEL: INFO
+    restart: always
+    networks:
+      - confluent-networks
 
   broker:
     image: confluentinc/cp-kafka:7.4.0
@@ -70,14 +75,18 @@ services:
       zookeeper:
         condition: service_healthy
     ports:
-      - "9092:9092"
+      - "9092:9092"   # listener EXTERNAL
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
-      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,PLAINTEXT_HOST://0.0.0.0:9092
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://broker:29092,PLAINTEXT_HOST://localhost:9092
+
+      # Protocols VALIDES
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT2:PLAINTEXT
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,PLAINTEXT2://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://broker:29092,PLAINTEXT2://localhost:9092
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+
+      # Autres configs
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
@@ -86,18 +95,102 @@ services:
       KAFKA_JMX_PORT: 9101
       KAFKA_JMX_HOSTNAME: localhost
       KAFKA_CONFLUENT_SCHEMA_REGISTRY_URL: http://schema-registry:8081
+
     healthcheck:
-      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:29092"]
+      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:29092 || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 90s
+    restart: always
+    networks:
+      - confluent-networks
+  airflow:
+    image: apache/airflow:2.10.1-python3.10
+    container_name: airflow
+    depends_on:
+      broker:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+
+    ports:
+      - "8080:8080"
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=SequentialExecutor
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      - AIRFLOW__WEBSERVER__SECRET_KEY=this_is_a_secret_key
+      - AIRFLOW__CORE__FERNET_KEY=''
+      - AIRFLOW__API__AUTH_BACKENDS=airflow.api.auth.backend.basic_auth
+
+    entrypoint: ["/entrypoint.sh"]
+
+    command: ["airflow", "webserver"]
+    logging:
+      options:
+        max-size: 100MB
+        max-file: 3
+
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./plugins:/opt/airflow/plugins
+      - ./requirements.txt:/opt/airflow/requirements.txt
+      - ./script/entrypoint.sh:/entrypoint.sh
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 120s
+    restart: always
+    networks:
+      - confluent-networks
+
+  scheduler:
+    image: apache/airflow:2.10.1-python3.10
+    container_name: scheduler
+    depends_on:
+      airflow:
+          condition: service_healthy
+    
+    restart: always
+    networks:
+      - confluent-networks
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./requirements.txt:/opt/airflow/requirements.txt
+      - ./script/entrypoint.sh:/entrypoint.sh
+
+    entrypoint: ["/entrypoint.sh"]
+    command: bash -c "pip install -r /opt/airflow/requirements.txt && airflow scheduler"
+  postgres:
+    image: postgres:15
+    container_name: postgres
+    ports:
+      - "5433:5432"
+    environment:
+      - POSTGRES_USER=airflow
+      - POSTGRES_PASSWORD=airflow
+      - POSTGRES_DB=airflow
+    volumes:
+      - ./postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
       interval: 10s
       timeout: 5s
       retries: 5
       start_period: 60s
     restart: always
     networks:
-      - confluent-network
+      - confluent-networks
 
 networks:
-  confluent-network:
+  confluent-networks:
     driver: bridge
 
 
